@@ -55,6 +55,7 @@ jobs:
 
   deploy-frontend:
     name: "🌐 Deploy Dashboard (${{ github.event.inputs.environment || 'Preprod' }})"
+    if: github.event_name == 'workflow_dispatch'
     needs: [build-frontend]
     environment: ${{ github.event.inputs.environment || 'Preprod' }}
     runs-on: ubuntu-latest
