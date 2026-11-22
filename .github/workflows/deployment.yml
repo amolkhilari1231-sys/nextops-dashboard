@@ -1,0 +1,101 @@
+name: "🌐 Frontend Deployment (nextops-dashboard)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target Cloud Environment"
+        required: true
+        type: choice
+        options:
+          - "Preprod"
+          - "Production"
+        default: "Preprod"
+      auto_rollback:
+        description: "Automatically rollback on deployment failure"
+        required: true
+        type: boolean
+        default: true
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-frontend:
+    name: "🔨 Build React Application"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build Application
+        env:
+          VITE_API_BASE_URL: "/api"
+        run: npm run build
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-dist
+          path: dist/
+          retention-days: 2
+
+  deploy-frontend:
+    name: "🌐 Deploy Dashboard (${{ github.event.inputs.environment || 'Preprod' }})"
+    needs: [build-frontend]
+    environment: ${{ github.event.inputs.environment || 'Preprod' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Build Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-dist
+          path: dist/
+
+      - name: Azure Login via OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to Azure VM
+        id: deploy
+        run: |
+          ENV="${{ github.event.inputs.environment || 'Preprod' }}"
+          chmod +x deployment/deploy.sh
+          ./deployment/deploy.sh "$ENV"
+
+      - name: Rollback on Failure
+        if: failure() && (github.event.inputs.auto_rollback == 'true' || github.event_name == 'push')
+        run: |
+          ENV="${{ github.event.inputs.environment || 'Preprod' }}"
+          if [ "$ENV" = "Production" ]; then
+            RG="prod_rg"
+            VM="axionbackendvm-prod"
+          else
+            RG="dev_rg"
+            VM="axionbackendvm"
+          fi
+          echo "⚠️ Deployment failed. Restoring previous dashboard release on $VM..."
+          az vm run-command invoke \
+            --resource-group "$RG" \
+            --name "$VM" \
+            --command-id RunShellScript \
+            --scripts "if [ -f /opt/nextops/backups/dashboard-backup.tar.gz ]; then tar -xzf /opt/nextops/backups/dashboard-backup.tar.gz -C /var/www/nextops-dashboard/; systemctl restart nginx; echo '✓ Restored from backup'; fi"
